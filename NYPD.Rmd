@@ -1,0 +1,198 @@
+---
+author: "Antonio J Rivera Lopez"
+title: "NYPD Report Analysis"
+output: html_document
+---
+
+```{r setup}
+library(tidyverse)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+**Reading the data**:
+
+```{r read data, results='hide'}
+shooting_data <- read_csv(file = "https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD")
+```
+
+**Clean out unnecessary columns**:
+
+```{r clean_columns}
+shooting_data <- shooting_data %>% select(INCIDENT_KEY, OCCUR_DATE, OCCUR_TIME, BORO, LOC_OF_OCCUR_DESC, LOCATION_DESC, PERP_AGE_GROUP, PERP_SEX, PERP_RACE, VIC_AGE_GROUP, VIC_SEX, VIC_RACE)
+```
+
+```{r lubridate}
+library(lubridate)
+```
+
+**Doing transformations to tidy up the data**:
+
+```{r tidying}
+# Join date and time variables
+shooting_data <- shooting_data %>% mutate(OCCUR_DATETIME = mdy_hms(paste(OCCUR_DATE, OCCUR_TIME, sep = " "))) %>% select(-c(OCCUR_DATE, OCCUR_TIME))
+
+# Add factors
+shooting_data <- shooting_data %>% mutate(PERP_AGE_GROUP = as.factor(PERP_AGE_GROUP), PERP_SEX = as.factor(PERP_SEX), PERP_RACE = as.factor(PERP_RACE), VIC_AGE_GROUP = as.factor(VIC_AGE_GROUP), VIC_SEX = as.factor(VIC_SEX), VIC_RACE = as.factor(VIC_RACE))
+
+```
+
+```{r summary}
+summary(shooting_data)
+```
+
+**Consolidate all missing values to NA**:
+
+```{r consolidate NAs}
+na_strings <- c("(null)", "NA's")
+
+shooting_data <- shooting_data %>%  
+  mutate(across(everything(), ~ {
+    x <- as.character(.x)
+    x_clean <- reduce(na_strings, na_if, .init = x)
+    factor(x_clean)  # Back to factor
+  }))
+
+shooting_data
+```
+
+There are plenty of NA values, I will leave them there for now, if some
+analysis requires them to be removed then I can remove them at that
+moment.
+
+------------------------------------------------------------------------
+
+### Visualizations
+
+One simple but interesting visualization we can make is to see the most
+common age for the perpetrators along with their sex. Here I removed the
+NAs since they do not offer insight for this visualization:
+
+```{r perpv}
+ggplot(na.omit(shooting_data), aes(x = PERP_AGE_GROUP, fill = PERP_SEX)) +
+  geom_bar(position = position_dodge()) +
+  labs(title = "Shooting Counts by Perpetrator Sex", x = "Age Group", y = "Shooting Counts", fill = "Sex") +
+  theme_minimal()  
+```
+
+We can see from this visualization that based on this data, men around
+25-44 years old, are the ones that tend to commit more shootings.
+
+```{r sex_prop}
+M_perp <- shooting_data %>% filter(shooting_data$PERP_SEX == "M")
+F_perp <- shooting_data %>% filter(shooting_data$PERP_SEX == "F")
+sex_prop <- sum(!is.na(M_perp)) / sum(!is.na(F_perp))
+print(sex_prop)
+```
+
+Based on this data, men in this study are 36 times more likely to commit
+shootings than women.
+
+### Model
+
+We can use a logistic regression model to fit
+the data and see how well victim age groups
+relate to sex.
+
+```{r create model}
+clean_sh_data <- shooting_data %>% filter(VIC_SEX %in% c("M", "F"), !is.na(VIC_AGE_GROUP), !is.na(VIC_SEX))
+
+clean_sh_data$VIC_SEX <- factor(clean_sh_data$VIC_SEX, levels = c("F", "M")) 
+
+clean_sh_data <- clean_sh_data %>% filter(VIC_AGE_GROUP %in% c("<18", "18-24", "25-44", "45-64", "65+")) %>% droplevels()
+
+model <- glm(VIC_SEX ~ VIC_AGE_GROUP, data = clean_sh_data, family = "binomial")
+summary(model)
+
+```
+
+
+### Visualize model output
+
+```{r modelv}
+# Get all levels of VIC_AGE_GROUP
+age_levels <- levels(clean_sh_data$VIC_AGE_GROUP)
+
+# Create a new data frame for prediction
+newdata <- data.frame(VIC_AGE_GROUP = age_levels)
+
+# Predict probabilities
+newdata$predicted_prob <- predict(model, newdata = newdata, type = "response")
+
+ggplot(newdata, aes(x = VIC_AGE_GROUP, y = predicted_prob)) +
+  geom_col(fill = "steelblue") +
+  labs(
+    title = "Predicted Probability of Victim Being Male by Age Group",
+    x = "Victim Age Group",
+    y = "Predicted Probability (Male)"
+  ) +
+  ylim(0, 1) +
+  theme_minimal()
+```
+
+What we can see here is that the probability
+of a victim being male is the highest for the
+age groups: 18-24, 25-44. Using this information with the previous bar chart 
+analysis, we can say that the victims and 
+perpetrators are roughly the same age and are mostly male. This pattern is likely to repeat
+going forward.
+
+------------------------------------------------------------------------
+
+Now we analyze how race affects the prevalence of shootings.
+
+```{r race_tilev}
+race_counts <- shooting_data %>% count(PERP_RACE, VIC_RACE) %>% filter(!is.na(PERP_RACE), !is.na(VIC_RACE)) %>% filter(PERP_RACE != "UNKNOWN", VIC_RACE != "UNKNOWN") %>%   mutate(PERP_RACE = fct_recode(
+    PERP_RACE,
+    "NatAm" = "AMERICAN INDIAN/ALASKAN NATIVE",
+    "AsiaPac"   = "ASIAN / PACIFIC ISLANDER",
+    "Black"           = "BLACK",
+    "BlackHisp"  = "BLACK HISPANIC",
+    "White"           = "WHITE",
+    "WhiteHisp"  = "WHITE HISPANIC"
+  )) %>% mutate(VIC_RACE = fct_recode(
+    VIC_RACE,
+    "NatAm" = "AMERICAN INDIAN/ALASKAN NATIVE",
+    "AsiaPac"   = "ASIAN / PACIFIC ISLANDER",
+    "Black"           = "BLACK",
+    "BlackHisp"  = "BLACK HISPANIC",
+    "White"           = "WHITE",
+    "WhiteHisp"  = "WHITE HISPANIC"
+  ))
+
+
+ggplot(race_counts, aes(VIC_RACE, PERP_RACE)) +
+  geom_tile(aes(fill = n)) +
+  geom_text(aes(label = n, colour = "white"), size = 3) +
+  labs(title = "Perpetrator Race vs. Victim Race Shooting Counts")
+  
+
+```
+
+------------------------------------------------------------------------
+
+We can see from the visualization that black on black shootings are the
+most common in this dataset. We need to be careful not to conclude that
+this implies that the race has an inherit correlation with violence,
+other variables such as income, poverty levels in the area, etc. could
+provide more insight and help us draw a more educated conclusion.
+
+### Conclusion
+
+Using data wrangling, transformations and visualizations, we saw two main
+patterns in the data. The first one was that most shootings are executed by male
+subjects, female subjects have a much lower incidence count. Men of the same age group are
+also the most likely to shoot each other based
+on the logistic regression model we created.
+
+The second pattern we found in the data is that race affects 
+the prevalence of shootings. Certain race pairs have more shootings than others.
+
+### Personal Bias
+
+I have a bias for thinking that traditionally unrepresented communities like
+hispanics, blacks, and women continue to be treated unfairly. But here I tried
+to be impartial by first analyzing a case where my bias is confirmed---men being
+the highest perpetrators---and then analyzing a case where we look at race and
+look for patterns without neglecting the effect it has on the shooting counts.
+
